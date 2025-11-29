@@ -57,6 +57,12 @@ class DocumentPrintStates(StatesGroup):
     print_type = State()
     quantity = State()
 
+class SouvenirStates(StatesGroup):
+    type = State()
+    quantity = State()
+    description = State()
+    waiting_for_file = State()
+
 # === УНИВЕРСАЛЬНЫЕ ФУНКЦИИ МЕНЮ ===
 def make_keyboard(buttons, with_cancel=True):
     kb = ReplyKeyboardBuilder()
@@ -64,7 +70,7 @@ def make_keyboard(buttons, with_cancel=True):
         for row in buttons:
             for btn in row:
                 kb.button(text=btn)
-            kb.adjust(*[1]*len(row))  # гибкая настройка
+            kb.adjust(*[1]*len(row))
     else:
         for btn in buttons:
             kb.button(text=btn)
@@ -98,6 +104,9 @@ def paper_type_menu():
 
 def print_type_menu():
     return make_keyboard(["Чёрно-белая", "Цветная"])
+
+def souvenir_type_menu():
+    return make_keyboard(["👕 Футболка", "☕ Кружка", "🖼️ Фото на керамике", "✏️ Другое"])
 
 # === РАБОТА С БД ===
 def init_db():
@@ -135,21 +144,6 @@ def delete_order(order_id):
     c.execute("DELETE FROM photos WHERE order_id = ?", (order_id,))
     conn.commit()
     conn.close()
-
-def save_photo(order_id, file_id):
-    conn = sqlite3.connect('bot.db')
-    c = conn.cursor()
-    c.execute("INSERT INTO photos (order_id, file_id) VALUES (?, ?)", (order_id, file_id))
-    conn.commit()
-    conn.close()
-
-def count_photos(order_id):
-    conn = sqlite3.connect('bot.db')
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM photos WHERE order_id = ?", (order_id,))
-    count = c.fetchone()[0]
-    conn.close()
-    return count
 
 # === ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОТМЕНЫ ===
 @router.message(F.text == "❌ Отмена")
@@ -215,11 +209,14 @@ async def photo_id_phone(message: Message, state: FSMContext):
 async def photo_id_time(message: Message, state: FSMContext):
     if message.text == "❌ Отмена": return
     data = await state.get_data()
-    studio, size, phone, time = data['studio'], data['size'], message.text, message.text
+    studio = data['studio']
+    size = data['size']
+    phone = data['phone']
+    time = message.text
     price = ID_PHOTO_SIZES[size]
-    details = f"Студия: {studio}\nРазмер: {size}\nТелефон: {data['phone']}\nВремя: {time}\nСумма: {price} ₽"
+    details = f"Студия: {studio}\nРазмер: {size}\nТелефон: {phone}\nВремя: {time}\nСумма: {price} ₽"
     
-    order_id = save_order(message.from_user.id, message.from_user.username, "photo_id", details)
+    save_order(message.from_user.id, message.from_user.username, "photo_id", details)
     
     await message.answer(
         f"✅ Запись подтверждена!\n📍 {studio}\n💰 К оплате: {price} ₽\n\n"
@@ -293,7 +290,7 @@ async def print_paper_type(message: Message, state: FSMContext):
         "1️⃣ Оплатите через СБП.\n"
         "2️⃣ Отправьте фото для печати (можно по одному)."
     )
-    await bot.send_message(ADMIN_ID, f"🖨️ Фотопечать\n{details}")
+    await bot.send_message(ADMIN_ID, f"🖨️ Фотопечать\nЗаказ ID {order_id}\n{details}")
     await state.set_state(PhotoPrintStates.waiting_for_photos)
 
 @router.message(PhotoPrintStates.waiting_for_photos, F.photo)
@@ -306,10 +303,15 @@ async def receive_photo(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    save_photo(order_id, message.photo[-1].file_id)
-    received = count_photos(order_id)
-    expected = data['quantity']
+    conn = sqlite3.connect('bot.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO photos (order_id, file_id) VALUES (?, ?)", (order_id, message.photo[-1].file_id))
+    c.execute("SELECT COUNT(*) FROM photos WHERE order_id = ?", (order_id,))
+    received = c.fetchone()[0]
+    conn.commit()
+    conn.close()
 
+    expected = data['quantity']
     if received < expected:
         await message.answer(f"🖼️ Получено {received}/{expected}. Отправьте ещё {expected - received}.")
     else:
@@ -365,31 +367,102 @@ async def doc_quantity(message: Message, state: FSMContext):
     
     save_order(message.from_user.id, message.from_user.username, "document_print", details)
     await message.answer(f"✅ Итого: {total} ₽.\nОплатите через СБП и пришлите файлы для печати.")
-    await bot.send_message(ADMIN_ID, f"📄 Распечатка\n{details}")
+    await bot.send_message(ADMIN_ID, f"📄 Распечатка документов\n{details}")
     await state.clear()
     await message.answer("✅ Ваш заказ принят в работу!", reply_markup=main_menu())
 
-# === СУВЕНИРЫ ===
+# === 🧵 СУВЕНИРЫ С ВЫБОРОМ ТИПА ===
 @router.message(F.text == "👕 Сувениры")
-async def souvenirs(message: Message):
+async def start_souvenirs(message: Message, state: FSMContext):
+    await state.set_state(SouvenirStates.type)
     await message.answer(
-        "🎨 Опишите, что хотите заказать:\n"
-        "- Кружка, футболка, фото на керамике и т.д.\n"
-        "- Пришлите макет (если есть).\n\n"
-        "Мы пришлём расчёт в ближайшее время!"
+        "🎁 Выберите тип сувенира:",
+        reply_markup=souvenir_type_menu()
     )
-    await bot.send_message(ADMIN_ID, f"👕 Сувениры от @{message.from_user.username}")
-    await message.answer("✅ Ваш запрос принят в работу!", reply_markup=main_menu())
 
-# === ФАЙЛЫ (документы, макеты) ===
-@router.message(F.document)
-async def handle_docs(message: Message):
-    await message.answer("📎 Файл получен! Обрабатываем...")
+@router.message(SouvenirStates.type)
+async def souvenir_type(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена": return
+    valid_types = ["👕 Футболка", "☕ Кружка", "🖼️ Фото на керамике", "✏️ Другое"]
+    if message.text not in valid_types:
+        await message.answer("❌ Выберите тип сувенира из списка:", reply_markup=souvenir_type_menu())
+        return
+    await state.update_data(souvenir_type=message.text)
+    await state.set_state(SouvenirStates.quantity)
+    await message.answer("🔢 Укажите количество:", reply_markup=make_keyboard([], with_cancel=True))
 
-# === ЗАПУСК ===
+@router.message(SouvenirStates.quantity)
+async def souvenir_quantity(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена": return
+    if not message.text.isdigit() or int(message.text) <= 0:
+        await message.answer("❌ Введите корректное число (например: 2):")
+        return
+    await state.update_data(quantity=int(message.text))
+    await state.set_state(SouvenirStates.description)
+    await message.answer(
+        "✏️ Опишите пожелания (размер, цвет, надпись и т.д.):",
+        reply_markup=make_keyboard([], with_cancel=True)
+    )
+
+@router.message(SouvenirStates.description)
+async def souvenir_description(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена": return
+    await state.update_data(description=message.text)
+    await state.set_state(SouvenirStates.waiting_for_file)
+    await message.answer(
+        "📎 Пришлите макет (изображение или PDF). Если макета нет — напишите «Без макета».",
+        reply_markup=make_keyboard([], with_cancel=True)
+    )
+
+@router.message(SouvenirStates.waiting_for_file, F.photo | F.document)
+async def souvenir_file_received(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена": return
+    data = await state.get_data()
+    s_type = data['souvenir_type']
+    qty = data['quantity']
+    desc = data['description']
+    
+    if message.photo:
+        file_info = "Фото прикреплено"
+    elif message.document:
+        file_info = f"Файл: {message.document.file_name}"
+    else:
+        file_info = "Неизвестный файл"
+
+    details = f"Тип: {s_type}\nКол-во: {qty}\nПожелания: {desc}\n{file_info}"
+    order_id = save_order(message.from_user.id, message.from_user.username, "souvenirs", details)
+    
+    await bot.send_message(ADMIN_ID, f"👕 Сувениры\nЗаказ ID {order_id}\nКлиент: @{message.from_user.username}\n{details}")
+    
+    await state.clear()
+    await message.answer("✅ Ваш заказ на сувенирную продукцию принят в работу!", reply_markup=main_menu())
+
+@router.message(SouvenirStates.waiting_for_file, F.text)
+async def souvenir_no_file(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена": return
+    if "без макета" in message.text.lower():
+        data = await state.get_data()
+        s_type = data['souvenir_type']
+        qty = data['quantity']
+        desc = data['description']
+        details = f"Тип: {s_type}\nКол-во: {qty}\nПожелания: {desc}\nБез макета"
+        order_id = save_order(message.from_user.id, message.from_user.username, "souvenirs", details)
+        await bot.send_message(ADMIN_ID, f"👕 Сувениры\nЗаказ ID {order_id}\nКлиент: @{message.from_user.username}\n{details}")
+        await state.clear()
+        await message.answer("✅ Заказ принят! Мы свяжемся для уточнения деталей.", reply_markup=main_menu())
+    else:
+        await message.answer("Пожалуйста, пришлите файл или напишите «Без макета».", reply_markup=make_keyboard([], with_cancel=True))
+
+# === ЗАПУСК БОТА ===
 async def main():
     init_db()
     dp.include_router(router)
+    
+    try:
+        await bot.send_message(ADMIN_ID, "✅ Бот A1 запущен и готов принимать заказы!")
+    except Exception as e:
+        print(f"Не удалось уведомить админа: {e}")
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
