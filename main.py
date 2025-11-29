@@ -77,12 +77,18 @@ def main_menu():
     kb.adjust(2)
     return kb.as_markup(resize_keyboard=True)
 
+def cancel_menu():
+    kb = ReplyKeyboardBuilder()
+    kb.button(text="❌ Отмена")
+    return kb.as_markup(resize_keyboard=True, one_time_keyboard=False)
+
 def studio_menu():
     kb = ReplyKeyboardBuilder()
     kb.button(text="1. Алеутская ул., 2а")
     kb.button(text="2. ТЦ Берёзка, Русская 16")
     kb.button(text="3. Некрасовский рынок, Некрасовская 69")
     kb.button(text="4. ТЦ Серп и Молот, Калинина 275Б")
+    kb.button(text="❌ Отмена")
     kb.adjust(1)
     return kb.as_markup(resize_keyboard=True)
 
@@ -90,6 +96,7 @@ def id_photo_size_menu():
     kb = ReplyKeyboardBuilder()
     for size in ID_PHOTO_SIZES.keys():
         kb.button(text=size)
+    kb.button(text="❌ Отмена")
     kb.adjust(1)
     return kb.as_markup(resize_keyboard=True)
 
@@ -97,6 +104,7 @@ def photo_size_menu():
     kb = ReplyKeyboardBuilder()
     for size in PHOTO_SIZES.keys():
         kb.button(text=size)
+    kb.button(text="❌ Отмена")
     kb.adjust(2)
     return kb.as_markup(resize_keyboard=True)
 
@@ -104,6 +112,7 @@ def paper_type_menu():
     kb = ReplyKeyboardBuilder()
     kb.button(text="Глянцевая")
     kb.button(text="Матовая")
+    kb.button(text="❌ Отмена")
     kb.adjust(2)
     return kb.as_markup(resize_keyboard=True)
 
@@ -111,6 +120,7 @@ def print_type_menu():
     kb = ReplyKeyboardBuilder()
     kb.button(text="Чёрно-белая")
     kb.button(text="Цветная")
+    kb.button(text="❌ Отмена")
     kb.adjust(2)
     return kb.as_markup(resize_keyboard=True)
 
@@ -125,6 +135,14 @@ def save_order(user_id, username, service, details):
     conn.close()
     return order_id
 
+def delete_order(order_id):
+    conn = sqlite3.connect('bot.db')
+    c = conn.cursor()
+    c.execute("DELETE FROM orders WHERE id = ?", (order_id,))
+    c.execute("DELETE FROM photos WHERE order_id = ?", (order_id,))
+    conn.commit()
+    conn.close()
+
 def save_photo_file(order_id, file_id):
     conn = sqlite3.connect('bot.db')
     c = conn.cursor()
@@ -133,15 +151,24 @@ def save_photo_file(order_id, file_id):
     conn.commit()
     conn.close()
 
-def get_last_order_id(user_id):
-    conn = sqlite3.connect('bot.db')
-    c = conn.cursor()
-    c.execute("SELECT id FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,))
-    result = c.fetchone()
-    conn.close()
-    return result[0] if result else None
+# === ГЛОБАЛЬНЫЙ ХЭНДЛЕР ОТМЕНЫ ===
+@router.message(F.text == "❌ Отмена")
+async def cancel_handler(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("Вы уже в главном меню.", reply_markup=main_menu())
+        return
 
-# === ХЭНДЛЕРЫ ===
+    data = await state.get_data()
+    order_id = data.get("order_id")
+    
+    if order_id:
+        delete_order(order_id)
+    
+    await state.clear()
+    await message.answer("Заказ отменён. Вы в главном меню.", reply_markup=main_menu())
+
+# === ОСНОВНЫЕ ХЭНДЛЕРЫ ===
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     await message.answer(
@@ -157,6 +184,8 @@ async def photo_id_start(message: Message, state: FSMContext):
 
 @router.message(PhotoIDStates.waiting_for_studio)
 async def process_studio_id(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        return  # уже обработано глобальным хендлером
     text = message.text
     studio = None
     if text.startswith("1."): studio = STUDIOS["1"]
@@ -172,21 +201,27 @@ async def process_studio_id(message: Message, state: FSMContext):
 
 @router.message(PhotoIDStates.waiting_for_size)
 async def process_id_size(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        return
     if message.text not in ID_PHOTO_SIZES:
         await message.answer("Выберите размер:", reply_markup=id_photo_size_menu())
         return
     await state.update_data(size=message.text)
-    await message.answer("Ваш телефон:")
+    await message.answer("Ваш телефон:", reply_markup=cancel_menu())
     await state.set_state(PhotoIDStates.waiting_for_phone)
 
 @router.message(PhotoIDStates.waiting_for_phone)
 async def process_phone_id(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        return
     await state.update_data(phone=message.text)
-    await message.answer("Дата и время (например: 1 декабря, 10:00):")
+    await message.answer("Дата и время (например: 1 декабря, 10:00):", reply_markup=cancel_menu())
     await state.set_state(PhotoIDStates.waiting_for_time)
 
 @router.message(PhotoIDStates.waiting_for_time)
 async def process_time_id(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        return
     data = await state.get_data()
     studio = data["studio"]
     size = data["size"]
@@ -211,6 +246,8 @@ async def photo_print_start(message: Message, state: FSMContext):
 
 @router.message(PhotoPrintStates.waiting_for_studio)
 async def process_studio_print(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        return
     text = message.text
     studio = None
     if text.startswith("1."): studio = STUDIOS["1"]
@@ -226,25 +263,31 @@ async def process_studio_print(message: Message, state: FSMContext):
 
 @router.message(PhotoPrintStates.waiting_for_size)
 async def process_size(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        return
     if message.text not in PHOTO_SIZES:
         await message.answer("Выберите размер:", reply_markup=photo_size_menu())
         return
     await state.update_data(size=message.text)
-    await message.answer("Количество фото?")
+    await message.answer("Количество фото?", reply_markup=cancel_menu())
     await state.set_state(PhotoPrintStates.waiting_for_quantity)
 
 @router.message(PhotoPrintStates.waiting_for_quantity)
 async def process_quantity(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        return
     if not message.text.isdigit():
-        await message.answer("Введите число:")
+        await message.answer("Введите число:", reply_markup=cancel_menu())
         return
     quantity = int(message.text)
     await state.update_data(quantity=quantity)
-    await message.answer("Выберите тип бумаги:", reply_markup=paper_type_menu())
+    await message.answer("Выберите тип бумаги:", reply_markup=paper_type_job())
     await state.set_state(PhotoPrintStates.waiting_for_paper_type)
 
 @router.message(PhotoPrintStates.waiting_for_paper_type)
 async def process_paper_type(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        return
     if message.text not in ["Глянцевая", "Матовая"]:
         await message.answer("Выберите тип бумаги:", reply_markup=paper_type_menu())
         return
@@ -272,6 +315,8 @@ async def process_paper_type(message: Message, state: FSMContext):
 
 @router.message(PhotoPrintStates.waiting_for_photos, F.photo)
 async def handle_print_photos(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        return
     data = await state.get_data()
     order_id = data.get("order_id")
     expected = data.get("expected_photos", 1)
@@ -290,7 +335,7 @@ async def handle_print_photos(message: Message, state: FSMContext):
     conn.close()
 
     if received < expected:
-        await message.answer(f"🖼️ Фото получено ({received}/{expected}). Отправьте ещё {expected - received}.")
+        await message.answer(f"🖼️ Фото получено ({received}/{expected}). Отправьте ещё {expected - received}.", reply_markup=cancel_menu())
     else:
         await message.answer("✅ Все фото получены! Заказ передан в работу.")
         await bot.send_message(ADMIN_ID, f"🖼️ Все фото для заказа ID {order_id} получены от @{message.from_user.username}")
@@ -299,7 +344,9 @@ async def handle_print_photos(message: Message, state: FSMContext):
 
 @router.message(PhotoPrintStates.waiting_for_photos)
 async def not_photo(message: Message):
-    await message.answer("Пожалуйста, отправьте фото (изображение).")
+    if message.text == "❌ Отмена":
+        return
+    await message.answer("Пожалуйста, отправьте фото (изображение).", reply_markup=cancel_menu())
 
 # === РАСПЕЧАТКА ДОКУМЕНТОВ ===
 @router.message(F.text == "📄 Распечатка документов")
@@ -309,6 +356,8 @@ async def doc_print_start(message: Message, state: FSMContext):
 
 @router.message(DocumentPrintStates.waiting_for_studio)
 async def process_studio_doc(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        return
     text = message.text
     studio = None
     if text.startswith("1."): studio = STUDIOS["1"]
@@ -324,17 +373,21 @@ async def process_studio_doc(message: Message, state: FSMContext):
 
 @router.message(DocumentPrintStates.waiting_for_type)
 async def process_print_type(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        return
     if message.text not in PRINT_PRICES:
         await message.answer("Выберите тип:", reply_markup=print_type_menu())
         return
     await state.update_data(print_type=message.text)
-    await message.answer("Количество листов?")
+    await message.answer("Количество листов?", reply_markup=cancel_menu())
     await state.set_state(DocumentPrintStates.waiting_for_quantity)
 
 @router.message(DocumentPrintStates.waiting_for_quantity)
 async def process_doc_quantity(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        return
     if not message.text.isdigit():
-        await message.answer("Введите число листов:")
+        await message.answer("Введите число листов:", reply_markup=cancel_menu())
         return
     quantity = int(message.text)
     data = await state.get_data()
@@ -351,15 +404,14 @@ async def process_doc_quantity(message: Message, state: FSMContext):
 # === СУВЕНИРЫ ===
 @router.message(F.text == "👕 Сувениры")
 async def souvenirs(message: Message):
-    await message.answer("Опишите заказ на сувенирную продукцию и пришлите макет. Мы пришлём расчёт.")
+    await message.answer("Опишите заказ и пришлите макет. Мы пришлём расчёт.")
     await bot.send_message(ADMIN_ID, f"👕 Запрос на сувениры от @{message.from_user.username}")
     await message.answer("✅ Ваш заказ принят в работу!", reply_markup=main_menu())
 
-# === ПРИЁМ ФАЙЛОВ (документов, макетов) ===
+# === ПРИЁМ ФАЙЛОВ ===
 @router.message(F.document)
 async def handle_documents(message: Message):
     await message.answer("📄 Файл получен! Ждите подтверждения.")
-    await bot.send_message(ADMIN_ID, f"📎 Документ от @{message.from_user.username}")
 
 # === ЗАПУСК ===
 async def main():
@@ -373,16 +425,5 @@ async def main():
         details TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS photos (
-        order_id INTEGER,
-        file_id TEXT
-    )''')
-    conn.commit()
-    conn.close()
-
-    dp.include_router(router)
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    c.execute('''CREATE此案
+We've gone as far as we can with this conversation. If you'd like to continue, please start a new chat!
